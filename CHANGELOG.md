@@ -13,6 +13,7 @@
 - [Home] Fix two tabs opened by middle click in Firefox [#3450](https://github.com/vatesfr/xen-orchestra/issues/3450) (PR [#3825](https://github.com/vatesfr/xen-orchestra/pull/3825))
 - [XOA] Enable downgrade for ending trial (PR [#3867](https://github.com/vatesfr/xen-orchestra/pull/3867))
 - [OVA import] allow import of big files [#3468](https://github.com/vatesfr/xen-orchestra/issues/3468) (PR [#3504](https://github.com/vatesfr/xen-orchestra/pull/3504))
+- [Stats] Fix getting VM statistics break when it not exists in the RRD (PR [#3859](https://github.com/vatesfr/xen-orchestra/pull/3859))
 
 ### Released packages
 
