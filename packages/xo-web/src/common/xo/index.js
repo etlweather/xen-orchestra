@@ -784,12 +784,12 @@ export const emergencyShutdownHosts = hosts => {
 }
 
 export const installHostPatch = (host, { uuid }) =>
-  _call('host.installPatch', { host: resolveId(host), patch: uuid })::tap(() =>
-    subscribeHostMissingPatches.forceRefresh(host)
+  _call('pool.installPatches', { host: resolveId(host), patch: [uuid] })::tap(
+    () => subscribeHostMissingPatches.forceRefresh(host)
   )
 
 export const installAllHostPatches = host =>
-  _call('host.installAllPatches', { host: resolveId(host) })::tap(() =>
+  _call('pool.installPatches', { host: resolveId(host) })::tap(() =>
     subscribeHostMissingPatches.forceRefresh(host)
   )
 
@@ -802,7 +802,7 @@ export const installAllPatchesOnPool = pool => {
     icon: 'host-patch-update',
   }).then(
     () =>
-      _call('pool.installAllPatches', { pool: poolId })::tap(() =>
+      _call('pool.installPatches', { pool: poolId })::tap(() =>
         subscribeHostMissingPatches.forceRefresh()
       ),
     noop
