@@ -54,6 +54,8 @@ import {
   resolveRelativeFromFile,
   safeDateFormat,
   serializeError,
+  type SimpleIdPattern,
+  unboxIdsFromPattern,
 } from '../../utils'
 
 import { translateLegacyJob } from './migration'
@@ -75,9 +77,18 @@ type Settings = {|
   vmTimeout?: number,
 |}
 
-type SimpleIdPattern = {|
-  id: string | {| __or: string[] |},
-|}
+const BACKUP_JOB_KEYS = new Set([
+  'compression',
+  'id',
+  'mode',
+  'name',
+  'remotes',
+  'settings',
+  'srs',
+  'type',
+  'userId',
+  'vms',
+])
 
 export type BackupJob = {|
   ...$Exact<Job>,
@@ -307,14 +318,6 @@ const parseVmBackupId = (id: string) => {
     metadataFilename: id.slice(i + 1),
     remoteId: id.slice(0, i),
   }
-}
-
-const unboxIds = (pattern?: SimpleIdPattern): string[] => {
-  if (pattern === undefined) {
-    return []
-  }
-  const { id } = pattern
-  return typeof id === 'string' ? [id] : id.__or
 }
 
 // similar to Promise.all() but do not gather results
@@ -591,7 +594,7 @@ export default class BackupNg {
           }
         }
         const jobId = job.id
-        const srs = unboxIds(job.srs).map(id => {
+        const srs = unboxIdsFromPattern(job.srs).map(id => {
           const xapi = app.getXapi(id)
           return {
             __proto__: xapi.getObject(id),
@@ -599,7 +602,7 @@ export default class BackupNg {
           }
         })
         const remotes = await Promise.all(
-          unboxIds(job.remotes).map(async id => ({
+          unboxIdsFromPattern(job.remotes).map(async id => ({
             id,
             handler: await app.getRemoteHandler(id),
           }))
@@ -715,6 +718,22 @@ export default class BackupNg {
     }
 
     return job
+  }
+
+  async editBackupNgJob(props: BackupJob): Promise<BackupJob> {
+    const app = this._app
+
+    const job = await app.getJob(props.id)
+    if (job.type !== 'backup') {
+      props.type = 'backup'
+      for (const key in job) {
+        if (!BACKUP_JOB_KEYS.has(key)) {
+          props[key] = null
+        }
+      }
+    }
+
+    return app.updateJob(props)
   }
 
   async deleteBackupNgJob(id: string): Promise<void> {

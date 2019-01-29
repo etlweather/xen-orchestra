@@ -16,18 +16,20 @@ import { confirm } from 'modal'
 import { connectStore, routes } from 'utils'
 import { constructQueryString } from 'smart-backup'
 import { Container, Row, Col } from 'grid'
-import { createGetLoneSnapshots } from 'selectors'
+import { createGetLoneSnapshots, createSelector } from 'selectors'
 import { get } from '@xen-orchestra/defined'
 import { isEmpty, map, groupBy, some } from 'lodash'
 import { NavLink, NavTabs } from 'nav'
 import {
   cancelJob,
-  deleteBackupNgJobs,
+  deleteBackupJobs,
   disableSchedule,
   enableSchedule,
   runBackupNgJob,
+  runMetadataBackupJob,
   subscribeBackupNgJobs,
   subscribeBackupNgLogs,
+  subscribeMetadataBackupJobs,
   subscribeSchedules,
 } from 'xo'
 
@@ -51,14 +53,18 @@ const Li = props => (
   />
 )
 
-const _runBackupNgJob = ({ id, name, schedule }) =>
+const _runBackupJob = ({ id, name, schedule, type }) =>
   confirm({
     title: _('runJob'),
     body: _('runBackupNgJobConfirm', {
       id: id.slice(0, 5),
       name: <strong>{name}</strong>,
     }),
-  }).then(() => runBackupNgJob({ id, schedule }))
+  }).then(() =>
+    type === 'backup'
+      ? runBackupNgJob({ id, schedule })
+      : runMetadataBackupJob({ id, schedule })
+  )
 
 const SchedulePreviewBody = decorate([
   addSubscriptions(({ schedule }) => ({
@@ -119,7 +125,8 @@ const SchedulePreviewBody = decorate([
             data-id={job.id}
             data-name={job.name}
             data-schedule={schedule.id}
-            handler={_runBackupNgJob}
+            data-type={job.type}
+            handler={_runBackupJob}
             icon='run-schedule'
             key='run'
             size='small'
@@ -159,10 +166,19 @@ const MODES = [
     test: job =>
       job.mode === 'full' && !isEmpty(get(() => destructPattern(job.srs))),
   },
+  {
+    label: 'poolMetadata',
+    test: job => !isEmpty(get(() => destructPattern(job.pools))),
+  },
+  {
+    label: 'xoConfig',
+    test: job => job.xoMetadata,
+  },
 ]
 
 @addSubscriptions({
   jobs: subscribeBackupNgJobs,
+  metadataJobs: subscribeMetadataBackupJobs,
   schedulesByJob: cb =>
     subscribeSchedules(schedules => {
       cb(groupBy(schedules, 'jobId'))
@@ -176,7 +192,7 @@ class JobsTable extends React.Component {
   static tableProps = {
     actions: [
       {
-        handler: deleteBackupNgJobs,
+        handler: deleteBackupJobs,
         label: _('deleteBackupSchedule'),
         icon: 'delete',
         level: 'danger',
@@ -219,7 +235,7 @@ class JobsTable extends React.Component {
         name: _('jobSchedules'),
       },
       {
-        itemRenderer: ({ compression = '', settings }) => {
+        itemRenderer: ({ compression = '', settings = {} }) => {
           const { concurrency, offlineSnapshot, reportWhen, timeout } =
             settings[''] || {}
 
@@ -261,6 +277,7 @@ class JobsTable extends React.Component {
             pathname: '/home',
             query: { t: 'VM', s: constructQueryString(job.vms) },
           }),
+        disabled: job => job.type !== 'backup',
         label: _('redirectToMatchingVms'),
         icon: 'preview',
       },
@@ -277,11 +294,22 @@ class JobsTable extends React.Component {
     this.context.router.push(path)
   }
 
+  _getCollection = createSelector(
+    () => this.props.jobs,
+    () => this.props.metadataJobs,
+    (jobs, metadataJobs) =>
+      isEmpty(metadataJobs)
+        ? jobs
+        : isEmpty(jobs)
+        ? metadataJobs
+        : [...jobs, ...metadataJobs]
+  )
+
   render() {
     return (
       <SortedTable
         {...JobsTable.tableProps}
-        collection={this.props.jobs}
+        collection={this._getCollection()}
         data-goTo={this._goTo}
         data-schedulesByJob={this.props.schedulesByJob}
       />

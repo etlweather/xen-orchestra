@@ -27,6 +27,7 @@ import {
 import {
   forbiddenOperation,
   noHostsAvailable,
+  noSuchObject,
   vmIsTemplate,
 } from 'xo-common/api-errors'
 
@@ -1944,10 +1945,14 @@ export const subscribeBackupNgLogs = createSubscription(() =>
   _call('backupNg.getAllLogs')
 )
 
+export const subscribeMetadataBackupJobs = createSubscription(() =>
+  _call('metadataBackup.getAllJobs')
+)
+
 export const createBackupNgJob = props =>
   _call('backupNg.createJob', props)::tap(subscribeBackupNgJobs.forceRefresh)
 
-export const deleteBackupNgJobs = async ids => {
+export const deleteBackupJobs = async ids => {
   const { length } = ids
   if (length === 0) {
     return
@@ -1963,8 +1968,19 @@ export const deleteBackupNgJobs = async ids => {
   }
 
   return Promise.all(
-    ids.map(id => _call('backupNg.deleteJob', { id: resolveId(id) }))
-  )::tap(subscribeBackupNgJobs.forceRefresh)
+    ids.map(id => {
+      id = resolveId(id)
+      return _call('backupNg.deleteJob', { id }).catch(reason => {
+        if (!noSuchObject.is(reason)) {
+          throw reason
+        }
+        return _call('metadataBackup.deleteJob', { id })
+      })
+    })
+  )
+    ::tap(subscribeBackupNgJobs.forceRefresh)
+    ::tap(subscribeMetadataBackupJobs.forceRefresh)
+    ::tap(subscribeSchedules.forceRefresh)
 }
 
 export const editBackupNgJob = props =>
@@ -2000,6 +2016,19 @@ export const deleteBackups = async backups => {
     await deleteBackup(backups[i])
   }
 }
+
+export const createMetadataBackupJob = props =>
+  _call('metadataBackup.createJob', props)::tap(
+    subscribeMetadataBackupJobs.forceRefresh
+  )
+
+export const editMetadataBackupJob = props =>
+  _call('metadataBackup.editJob', props)::tap(
+    subscribeMetadataBackupJobs.forceRefresh
+  )
+
+export const runMetadataBackupJob = params =>
+  _call('metadataBackup.runJob', params)
 
 // Plugins -----------------------------------------------------------
 

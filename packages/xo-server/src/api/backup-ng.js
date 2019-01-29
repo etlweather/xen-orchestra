@@ -61,7 +61,7 @@ deleteJob.params = {
 }
 
 export function editJob(props) {
-  return this.updateJob(props)
+  return this.editBackupNgJob(props)
 }
 
 editJob.permission = 'admin'

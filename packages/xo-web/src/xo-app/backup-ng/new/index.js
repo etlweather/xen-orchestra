@@ -23,7 +23,7 @@ import { injectState, provideState } from 'reaclette'
 import { Map } from 'immutable'
 import { Number } from 'form'
 import { renderXoItemFromId, Remote } from 'render-xo-item'
-import { SelectRemote, SelectSr, SelectVm } from 'select-objects'
+import { SelectRemote, SelectSr, SelectVm, SelectPool } from 'select-objects'
 import {
   addSubscriptions,
   connectStore,
@@ -33,9 +33,11 @@ import {
 } from 'utils'
 import {
   createBackupNgJob,
+  createMetadataBackupJob,
   createSchedule,
   deleteSchedule,
   editBackupNgJob,
+  editMetadataBackupJob,
   editSchedule,
   isSrWritable,
   subscribeRemotes,
@@ -144,18 +146,24 @@ const createDoesRetentionExist = name => {
   return ({ propSettings, settings = propSettings }) => settings.some(predicate)
 }
 
+const DisplayComponent = ({ predicate, component: Component, ...props }) =>
+  predicate ? <Component {...props} /> : null
+
 const getInitialState = () => ({
+  _backupMode: undefined,
+  _deltaMode: undefined,
+  _modePoolMetadata: undefined,
+  _modeXoConfig: undefined,
+  _name: undefined,
+  _pools: undefined,
+  _remotes: undefined,
+  _schedules: undefined,
   _vmsPattern: undefined,
-  backupMode: false,
   compression: undefined,
   crMode: false,
-  deltaMode: false,
   displayAdvancedSettings: undefined,
   drMode: false,
-  name: '',
   paramsUpdated: false,
-  remotes: [],
-  schedules: {},
   settings: undefined,
   showErrors: false,
   smartMode: false,
@@ -198,6 +206,75 @@ export default decorate([
   provideState({
     initialState: getInitialState,
     effects: {
+      createMetadataJob: () => async state => {
+        if (state.isJobInvalid) {
+          return {
+            showErrors: true,
+          }
+        }
+
+        await createMetadataBackupJob({
+          name: state.name,
+          pools: state.pools && constructPattern(state.pools),
+          remotes: constructPattern(state.remotes),
+          schedules: mapValues(
+            state.schedules,
+            ({ id, ...schedule }) => schedule
+          ),
+          xoMetadata: state.modeXoConfig,
+        })
+      },
+      editMetadataJob: () => async (state, props) => {
+        if (state.isJobInvalid) {
+          return {
+            showErrors: true,
+          }
+        }
+
+        const promises = []
+
+        for (const id in props.schedules) {
+          const schedule = state.schedules[id]
+          if (schedule === undefined) {
+            promises.push(deleteSchedule(id))
+            continue
+          }
+
+          promises.push(
+            editSchedule({
+              id,
+              cron: schedule.cron,
+              name: schedule.name,
+              timezone: schedule.timezone,
+              enabled: schedule.enabled,
+            })
+          )
+        }
+
+        for (const id in state.schedules) {
+          if (props.schedules[id] === undefined) {
+            const schedule = state.schedules[id]
+            promises.push(createSchedule(props.job.id), {
+              cron: schedule.cron,
+              name: schedule.name,
+              timezone: schedule.timezone,
+              enabled: schedule.enabled,
+            })
+          }
+        }
+
+        promises.push(
+          editMetadataBackupJob({
+            id: props.job.id,
+            name: state.name,
+            pools: state.pools && constructPattern(state.pools),
+            remotes: constructPattern(state.remotes),
+            xoMetadata: state.modeXoConfig,
+          })
+        )
+
+        await Promise.all(promises)
+      },
       createJob: () => async state => {
         if (state.isJobInvalid) {
           return {
@@ -315,6 +392,9 @@ export default decorate([
         ...state,
         [mode]: !state[mode],
       }),
+      togglePrivateMode: (_, { mode }) => state => ({
+        [`_${mode}`]: !state[mode],
+      }),
       setCheckboxValue: (_, { target: { checked, name } }) => state => ({
         ...state,
         [name]: checked,
@@ -329,9 +409,8 @@ export default decorate([
           },
         },
       }),
-      setName: (_, { target: { value } }) => state => ({
-        ...state,
-        name: value,
+      setName: (_, { target: { value } }) => () => ({
+        _name: value,
       }),
       setTargetDeleteFirst: (_, id) => ({
         propSettings,
@@ -341,18 +420,14 @@ export default decorate([
           deleteFirst: !settings.getIn([id, 'deleteFirst']),
         }),
       }),
-      addRemote: (_, remote) => state => {
-        return {
-          ...state,
-          remotes: [...state.remotes, resolveId(remote)],
-        }
-      },
+      addRemote: (_, remote) => state => ({
+        _remotes: [...state.remotes, resolveId(remote)],
+      }),
       deleteRemote: (_, key) => state => {
-        const remotes = [...state.remotes]
-        remotes.splice(key, 1)
+        const _remotes = [...state.remotes]
+        _remotes.splice(key, 1)
         return {
-          ...state,
-          remotes,
+          _remotes,
         }
       },
       addSr: (_, sr) => state => ({
@@ -368,26 +443,26 @@ export default decorate([
         }
       },
       setVms: (_, vms) => state => ({ ...state, vms }),
-      updateParams: () => (_, { job, schedules }) => {
-        const remotes =
-          job.remotes !== undefined ? destructPattern(job.remotes) : []
+      setPools: (_, _pools) => () => ({
+        _pools,
+      }),
+      updateParams: () => (_, { job }) => {
+        if (job.type !== 'backup') {
+          return
+        }
+
         const srs = job.srs !== undefined ? destructPattern(job.srs) : []
 
         return {
-          name: job.name,
           paramsUpdated: true,
           smartMode: job.vms.id === undefined,
           snapshotMode: some(
             job.settings,
             ({ snapshotRetention }) => snapshotRetention > 0
           ),
-          backupMode: job.mode === 'full' && !isEmpty(remotes),
-          deltaMode: job.mode === 'delta' && !isEmpty(remotes),
           drMode: job.mode === 'full' && !isEmpty(srs),
           crMode: job.mode === 'delta' && !isEmpty(srs),
-          remotes,
           srs,
-          schedules,
           ...destructVmsPattern(job.vms),
         }
       },
@@ -395,7 +470,7 @@ export default decorate([
         { saveSchedule },
         storedSchedule = DEFAULT_SCHEDULE
       ) => async (
-        { copyMode, exportMode, snapshotMode },
+        { isBackupNg, copyMode, exportMode, snapshotMode },
         { intl: { formatMessage } }
       ) => {
         const schedule = await form({
@@ -414,6 +489,7 @@ export default decorate([
           size: 'large',
           handler: value => {
             if (
+              isBackupNg &&
               !(
                 (exportMode && value.exportRetention > 0) ||
                 (copyMode && value.copyRetention > 0) ||
@@ -432,15 +508,15 @@ export default decorate([
         })
       },
       deleteSchedule: (_, schedule) => ({
-        schedules: oldSchedules,
+        schedules,
         propSettings,
         settings = propSettings,
       }) => {
         const id = resolveId(schedule)
-        const schedules = { ...oldSchedules }
-        delete schedules[id]
+        const _schedules = { ...schedules }
+        delete _schedules[id]
         return {
-          schedules,
+          _schedules,
           settings: settings.delete(id),
         }
       },
@@ -456,7 +532,7 @@ export default decorate([
           timezone,
         }
       ) => ({ propSettings, schedules, settings = propSettings }) => ({
-        schedules: {
+        _schedules: {
           ...schedules,
           [id]: {
             ...schedules[id],
@@ -541,6 +617,21 @@ export default decorate([
       inputReportWhenId: generateId,
       inputTimeoutId: generateId,
 
+      name: ({ _name }, { job }) => defined(_name, () => job.name, ''),
+      pools: ({ _pools }, { job }) =>
+        defined(_pools, () => destructPattern(job.pools)),
+      remotes: ({ _remotes }, { job }) =>
+        defined(_remotes, () => destructPattern(job.remotes), []),
+      schedules: ({ _schedules }, { schedules }) =>
+        defined(_schedules, schedules, {}),
+      modePoolMetadata: ({ _modePoolMetadata, pools }) =>
+        defined(_modePoolMetadata, !isEmpty(pools)),
+      modeXoConfig: ({ _modeXoConfig }, { job }) =>
+        defined(_modeXoConfig, () => job.xoMetadata),
+      backupMode: ({ _backupMode, remotes }, { job }) =>
+        defined(_backupMode, () => job.mode === 'full' && !isEmpty(remotes)),
+      deltaMode: ({ _deltaMode, remotes }, { job }) =>
+        defined(_deltaMode, () => job.mode === 'delta' && !isEmpty(remotes)),
       vmsPattern: ({ _vmsPattern }, { job }) =>
         defined(
           _vmsPattern,
@@ -554,6 +645,7 @@ export default decorate([
       isJobInvalid: state =>
         state.missingName ||
         state.missingVms ||
+        state.missingPools ||
         state.missingBackupMode ||
         state.missingSchedules ||
         state.missingRemotes ||
@@ -562,11 +654,13 @@ export default decorate([
         state.missingCopyRetention ||
         state.missingSnapshotRetention,
       missingName: state => state.name.trim() === '',
-      missingVms: state => isEmpty(state.vms) && !state.smartMode,
-      missingBackupMode: state =>
-        !state.isDelta && !state.isFull && !state.snapshotMode,
+      missingVms: state =>
+        state.isBackupNg && !state.smartMode && isEmpty(state.vms),
+      missingPools: state => state.modePoolMetadata && isEmpty(state.pools),
+      missingBackupMode: state => !state.isBackupNg && !state.isMetadataBackup,
       missingRemotes: state =>
-        (state.backupMode || state.deltaMode) && isEmpty(state.remotes),
+        (state.isMetadataBackup || state.backupMode || state.deltaMode) &&
+        isEmpty(state.remotes),
       missingSrs: state => (state.drMode || state.crMode) && isEmpty(state.srs),
       missingSchedules: state => isEmpty(state.schedules),
       missingExportRetention: state =>
@@ -582,6 +676,8 @@ export default decorate([
       snapshotRetentionExists: createDoesRetentionExist('snapshotRetention'),
       isDelta: state => state.deltaMode || state.crMode,
       isFull: state => state.backupMode || state.drMode,
+      isBackupNg: state => state.isDelta || state.isFull || state.snapshotMode,
+      isMetadataBackup: state => state.modePoolMetadata || state.modeXoConfig,
       vmsSmartPattern: ({ tags, vmsPattern }) => ({
         ...vmsPattern,
         tags: constructSmartPattern(tags, normalizeTagValues),
@@ -622,12 +718,12 @@ export default decorate([
     },
   }),
   injectState,
-  ({ state, effects, remotes, srsById, job = {}, intl }) => {
+  ({ state, effects, remotes, srsById, job, intl }) => {
     const { formatMessage } = intl
     const { propSettings, settings = propSettings } = state
     const { concurrency, reportWhen = 'failure', offlineSnapshot, timeout } =
       settings.get('') || {}
-    const compression = defined(state.compression, job.compression, '')
+    const compression = defined(state.compression, () => job.compression, '')
     const displayAdvancedSettings = defined(
       state.displayAdvancedSettings,
       compression !== '' || concurrency > 0 || timeout > 0 || offlineSnapshot
@@ -664,6 +760,7 @@ export default decorate([
                     <ActionButton
                       active={state.snapshotMode}
                       data-mode='snapshotMode'
+                      disabled={state.isMetadataBackup}
                       handler={effects.toggleMode}
                       icon='rolling-snapshot'
                     >
@@ -672,8 +769,8 @@ export default decorate([
                     <ActionButton
                       active={state.backupMode}
                       data-mode='backupMode'
-                      disabled={state.isDelta}
-                      handler={effects.toggleMode}
+                      disabled={state.isMetadataBackup || state.isDelta}
+                      handler={effects.togglePrivateMode}
                       icon='backup'
                     >
                       {_('backup')}
@@ -682,10 +779,11 @@ export default decorate([
                       active={state.deltaMode}
                       data-mode='deltaMode'
                       disabled={
+                        state.isMetadataBackup ||
                         state.isFull ||
                         (!state.deltaMode && process.env.XOA_PLAN < 3)
                       }
-                      handler={effects.toggleMode}
+                      handler={effects.togglePrivateMode}
                       icon='delta-backup'
                     >
                       {_('deltaBackup')}
@@ -694,6 +792,7 @@ export default decorate([
                       active={state.drMode}
                       data-mode='drMode'
                       disabled={
+                        state.isMetadataBackup ||
                         state.isDelta ||
                         (!state.drMode && process.env.XOA_PLAN < 3)
                       }
@@ -711,6 +810,7 @@ export default decorate([
                       active={state.crMode}
                       data-mode='crMode'
                       disabled={
+                        state.isMetadataBackup ||
                         state.isFull ||
                         (!state.crMode && process.env.XOA_PLAN < 4)
                       }
@@ -723,7 +823,30 @@ export default decorate([
                       <Tooltip content={_('crRequiresPremiumPlan')}>
                         <Icon icon='info' />
                       </Tooltip>
-                    )}
+                    )}{' '}
+                    <ActionButton
+                      active={state.modePoolMetadata}
+                      data-mode='modePoolMetadata'
+                      disabled={state.isBackupNg || process.env.XOA_PLAN < 4}
+                      handler={effects.togglePrivateMode}
+                      icon='pool'
+                    >
+                      {_('poolMetadata')}
+                    </ActionButton>{' '}
+                    <ActionButton
+                      active={state.modeXoConfig}
+                      data-mode='modeXoConfig'
+                      disabled={state.isBackupNg || process.env.XOA_PLAN < 4}
+                      handler={effects.togglePrivateMode}
+                      icon='file'
+                    >
+                      {_('xoConfig')}
+                    </ActionButton>{' '}
+                    {process.env.XOA_PLAN < 4 && (
+                      <Tooltip content={_('metadataRequiresPremiumPlan')}>
+                        <Icon icon='info' />
+                      </Tooltip>
+                    )}{' '}
                     <br />
                     <a
                       className='text-muted'
@@ -738,98 +861,54 @@ export default decorate([
                 </CardBlock>
               </FormFeedback>
               <br />
-              {(state.backupMode || state.deltaMode) && (
-                <Card>
-                  <CardHeader>
-                    {_(state.backupMode ? 'backup' : 'deltaBackup')}
-                    <Link
-                      className='btn btn-primary pull-right'
-                      target='_blank'
-                      to='/settings/remotes'
-                    >
-                      <Icon icon='settings' />{' '}
-                      <strong>{_('remotesSettings')}</strong>
-                    </Link>
-                  </CardHeader>
-                  <CardBlock>
-                    {isEmpty(remotes) ? (
-                      <span className='text-warning'>
-                        <Icon icon='alarm' /> {_('createRemoteMessage')}
-                      </span>
-                    ) : (
-                      <FormGroup>
-                        <label>
-                          <strong>{_('backupTargetRemotes')}</strong>
-                        </label>
-                        <FormFeedback
-                          component={SelectRemote}
-                          message={_('missingRemotes')}
-                          onChange={effects.addRemote}
-                          predicate={state.remotePredicate}
-                          error={
-                            state.showErrors ? state.missingRemotes : undefined
-                          }
-                          value={null}
-                        />
-                        <br />
-                        <Ul>
-                          {map(state.remotes, (id, key) => (
-                            <Li key={id}>
-                              <Remote id={id} />
-                              <div className='pull-right'>
-                                <DeleteOldBackupsFirst
-                                  handler={effects.setTargetDeleteFirst}
-                                  handlerParam={id}
-                                  value={settings.getIn([id, 'deleteFirst'])}
-                                />{' '}
-                                <ActionButton
-                                  btnStyle='danger'
-                                  handler={effects.deleteRemote}
-                                  handlerParam={key}
-                                  icon='delete'
-                                  size='small'
-                                />
-                              </div>
-                            </Li>
-                          ))}
-                        </Ul>
-                      </FormGroup>
-                    )}
-                  </CardBlock>
-                </Card>
-              )}
-              {(state.drMode || state.crMode) && (
-                <Card>
-                  <CardHeader>
-                    {_(
-                      state.drMode
-                        ? 'disasterRecovery'
-                        : 'continuousReplication'
-                    )}
-                  </CardHeader>
-                  <CardBlock>
+              <DisplayComponent
+                component={Card}
+                predicate={
+                  state.backupMode || state.deltaMode || state.isMetadataBackup
+                }
+              >
+                <CardHeader>
+                  {_(
+                    state.backupMode
+                      ? 'backup'
+                      : state.deltaMode
+                      ? 'deltaBackup'
+                      : 'metadataBackup'
+                  )}
+                  <Link
+                    className='btn btn-primary pull-right'
+                    target='_blank'
+                    to='/settings/remotes'
+                  >
+                    <Icon icon='settings' />{' '}
+                    <strong>{_('remotesSettings')}</strong>
+                  </Link>
+                </CardHeader>
+                <CardBlock>
+                  {isEmpty(remotes) ? (
+                    <span className='text-warning'>
+                      <Icon icon='alarm' /> {_('createRemoteMessage')}
+                    </span>
+                  ) : (
                     <FormGroup>
                       <label>
-                        <strong>{_('backupTargetSrs')}</strong>
+                        <strong>{_('backupTargetRemotes')}</strong>
                       </label>
                       <FormFeedback
-                        component={SelectSr}
-                        message={_('missingSrs')}
-                        onChange={effects.addSr}
-                        predicate={state.srPredicate}
-                        error={state.showErrors ? state.missingSrs : undefined}
+                        component={SelectRemote}
+                        message={_('missingRemotes')}
+                        onChange={effects.addRemote}
+                        predicate={state.remotePredicate}
+                        error={
+                          state.showErrors ? state.missingRemotes : undefined
+                        }
                         value={null}
                       />
                       <br />
                       <Ul>
-                        {map(state.srs, (id, key) => (
+                        {map(state.remotes, (id, key) => (
                           <Li key={id}>
-                            {renderXoItemFromId(id)}{' '}
-                            {!isEmpty(srsById) &&
-                              state.crMode &&
-                              get(() => srsById[id].SR_type) === 'lvm' && (
-                                <ThinProvisionedTip label='crOnThickProvisionedSrWarning' />
-                              )}
+                            <Remote id={id} />
                             <div className='pull-right'>
                               <DeleteOldBackupsFirst
                                 handler={effects.setTargetDeleteFirst}
@@ -838,20 +917,72 @@ export default decorate([
                               />{' '}
                               <ActionButton
                                 btnStyle='danger'
+                                handler={effects.deleteRemote}
+                                handlerParam={key}
                                 icon='delete'
                                 size='small'
-                                handler={effects.deleteSr}
-                                handlerParam={key}
                               />
                             </div>
                           </Li>
                         ))}
                       </Ul>
                     </FormGroup>
-                  </CardBlock>
-                </Card>
-              )}
-              <Card>
+                  )}
+                </CardBlock>
+              </DisplayComponent>
+              <DisplayComponent
+                component={Card}
+                predicate={state.drMode || state.crMode}
+              >
+                <CardHeader>
+                  {_(
+                    state.drMode ? 'disasterRecovery' : 'continuousReplication'
+                  )}
+                </CardHeader>
+                <CardBlock>
+                  <FormGroup>
+                    <label>
+                      <strong>{_('backupTargetSrs')}</strong>
+                    </label>
+                    <FormFeedback
+                      component={SelectSr}
+                      message={_('missingSrs')}
+                      onChange={effects.addSr}
+                      predicate={state.srPredicate}
+                      error={state.showErrors ? state.missingSrs : undefined}
+                      value={null}
+                    />
+                    <br />
+                    <Ul>
+                      {map(state.srs, (id, key) => (
+                        <Li key={id}>
+                          {renderXoItemFromId(id)}{' '}
+                          {!isEmpty(srsById) &&
+                            state.crMode &&
+                            get(() => srsById[id].SR_type) === 'lvm' && (
+                              <ThinProvisionedTip label='crOnThickProvisionedSrWarning' />
+                            )}
+                          <div className='pull-right'>
+                            <DeleteOldBackupsFirst
+                              handler={effects.setTargetDeleteFirst}
+                              handlerParam={id}
+                              value={settings.getIn([id, 'deleteFirst'])}
+                            />{' '}
+                            <ActionButton
+                              btnStyle='danger'
+                              icon='delete'
+                              size='small'
+                              handler={effects.deleteSr}
+                              handlerParam={key}
+                            />
+                          </div>
+                        </Li>
+                      ))}
+                    </Ul>
+                  </FormGroup>
+                </CardBlock>
+              </DisplayComponent>
+              <DisplayComponent component={Card} predicate={state.isBackupNg}>
                 <CardHeader>
                   {_('newBackupSettings')}
                   <ActionButton
@@ -947,10 +1078,10 @@ export default decorate([
                     </div>
                   )}
                 </CardBlock>
-              </Card>
+              </DisplayComponent>
             </Col>
             <Col mediumSize={6}>
-              <Card>
+              <DisplayComponent component={Card} predicate={state.isBackupNg}>
                 <CardHeader>
                   {_('vmsToBackup')}*{' '}
                   <ThinProvisionedTip label='vmsOnThinProvisionedSrTip' />
@@ -991,18 +1122,38 @@ export default decorate([
                     />
                   )}
                 </CardBlock>
-              </Card>
+              </DisplayComponent>
+              <DisplayComponent
+                component={Card}
+                predicate={state.modePoolMetadata}
+              >
+                <CardHeader>{_('pools')}*</CardHeader>
+                <CardBlock>
+                  <FormFeedback
+                    component={SelectPool}
+                    message={_('missingPools')}
+                    multi
+                    onChange={effects.setPools}
+                    error={state.showErrors ? state.missingPools : undefined}
+                    value={state.pools}
+                  />
+                </CardBlock>
+              </DisplayComponent>
               <Schedules />
             </Col>
           </Row>
           <Row>
             <Card>
               <CardBlock>
-                {state.paramsUpdated ? (
+                {job !== undefined ? (
                   <ActionButton
                     btnStyle='primary'
                     form={state.formId}
-                    handler={effects.editJob}
+                    handler={
+                      state.isMetadataBackup
+                        ? effects.editMetadataJob
+                        : effects.editJob
+                    }
                     icon='save'
                     redirectOnSuccess={
                       state.isJobInvalid ? undefined : '/backup-ng'
@@ -1015,7 +1166,11 @@ export default decorate([
                   <ActionButton
                     btnStyle='primary'
                     form={state.formId}
-                    handler={effects.createJob}
+                    handler={
+                      state.isMetadataBackup
+                        ? effects.createMetadataJob
+                        : effects.createJob
+                    }
                     icon='save'
                     redirectOnSuccess={
                       state.isJobInvalid ? undefined : '/backup-ng'

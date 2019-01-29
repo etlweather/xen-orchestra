@@ -1,15 +1,21 @@
 import addSubscriptions from 'add-subscriptions'
 import decorate from 'apply-decorators'
+import defined from '@xen-orchestra/defined'
 import React from 'react'
 import { injectState, provideState } from 'reaclette'
-import { subscribeBackupNgJobs, subscribeSchedules } from 'xo'
 import { find, groupBy, keyBy } from 'lodash'
+import {
+  subscribeBackupNgJobs,
+  subscribeMetadataBackupJobs,
+  subscribeSchedules,
+} from 'xo'
 
 import New from './new'
 
 export default decorate([
   addSubscriptions({
     jobs: subscribeBackupNgJobs,
+    metadataJobs: subscribeMetadataBackupJobs,
     schedulesByJob: cb =>
       subscribeSchedules(schedules => {
         cb(groupBy(schedules, 'jobId'))
@@ -17,7 +23,8 @@ export default decorate([
   }),
   provideState({
     computed: {
-      job: (_, { jobs, routeParams: { id } }) => find(jobs, { id }),
+      job: (_, { jobs, metadataJobs, routeParams: { id } }) =>
+        defined(find(jobs, { id }), find(metadataJobs, { id })),
       schedules: (_, { schedulesByJob, routeParams: { id } }) =>
         schedulesByJob && keyBy(schedulesByJob[id], 'id'),
     },
